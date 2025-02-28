@@ -1,0 +1,317 @@
+---
+title: "Bayes HW4"
+author: "Richard 'Ricky' Kuehn"
+date: "2024-12-06"
+output:
+  html_document:
+    df_print: paged
+---
+```{r setup, include=FALSE}
+# load libraries
+library(tidyverse)
+library(brms)
+
+# load date
+c_shop <- read_csv("hw4_data.csv")
+
+# fix data types
+c_shop <- c_shop |>
+  mutate(
+    food = as.factor(food),
+    store = as.factor(store)
+  )
+```
+
+### Problem Statement
+
+A regional coffee shop chain has tasked us with analyzing how store manager personality characteristics impact sales performance across their 20 locations. Specifically, we need to understand how manager conscientiousness and neuroticism affect overall sales, and whether these personality traits have different impacts on sales of the two product categories (food and coffee). 
+
+Additionally, we need to identify which stores are performing above or below expectations after controlling for manager personality traits, helping distinguish locations where other factors like staff performance or operations may be driving sales outcomes. 
+
+Using hierarchical Bayesian modeling, we can account for both store-level variations and personality effects to provide actionable insights for the chain's management.
+
+### Approach
+
+#### Model Structure
+
+**Level 1: Sales**  \
+\begin{equation}
+\text{sales}_{ij} = \beta_{0j} + \beta_{1j}(\text{food}) + \beta_2(\text{con}) + \beta_3(\text{neur}) + \beta_4(\text{food} \times \text{con}) + \beta_5(\text{food} \times \text{neur}) + \varepsilon_{ij}
+\end{equation}
+where $\varepsilon_{ij} \sim \text{Normal}(0, \sigma^2)$
+
+**Level 2: Store**  \
+\begin{align}
+\beta_{0j} &= \mu_0 + u_{0j} \\
+\beta_{1j} &= \mu_1 + u_{1j}
+\end{align}
+where $\begin{bmatrix} u_{0j} \\ u_{1j} \end{bmatrix} \sim \text{MVNormal}\left(\begin{bmatrix} 0 \\ 0 \end{bmatrix}, \boldsymbol{\Sigma}\right)$
+
+#### Model Components and Interpretation
+
+**Fixed Effects**  \
+$\beta_0$: Overall baseline for coffee sales  \
+$\beta_1$: Average difference between food and coffee sales  \
+$\beta_2$: Effect of conscientiousness on coffee sales  \
+$\beta_3$: Effect of neuroticism on coffee sales  \
+$\beta_4$: Additional effect of conscientiousness on food sales  \
+$\beta_5$: Additional effect of neuroticism on food sales  \
+
+**Random Effects**  \
+$u_{0j}$: Store-specific deviation from average coffee sales  \
+$u_{1j}$: Store-specific deviation in food vs coffee difference  \
+$\Sigma$: Variance-covariance matrix capturing the relationship between these deviations  \
+$\sigma^2$: Within-store residual variance  \
+
+**Expected Sales Calculations**  \
+*For coffee sales (food = 0):*  \
+Expected sales = $(\beta_0 + u_{0j}) + \beta_2(\text{con}) + \beta_3(\text{neur})$
+
+*For food sales (food = 1):*  \
+Expected sales = $(\beta_0 + u_{0j}) + (\beta_1 + u_{1j}) + (\beta_2 + \beta_4)(\text{con}) + (\beta_3 + \beta_5)(\text{neur})$
+
+#### Model Features
+**Hierarchical Structure:** The model uses a random slopes design (food|store) to account for both store-level clustering and store-specific differences in food vs. coffee sales performance.
+
+**Variance Components:**  \
+
+- Between-store variance in baseline sales ($\sigma^2_{0}$) captures systematic differences in coffee sales between stores  \
+- Between-store variance in food effect ($\sigma^2_{1}$) captures how stores differ in their food vs. coffee sales patterns  \
+- Covariance between these random effects ($\sigma_{01}$) captures relationships between baseline performance and food-coffee differences \
+- Residual variance ($\sigma^2$) captures within-store variability  \
+
+**Pooling of Information:**  \
+
+- The hierarchical structure allows for partial pooling of information across stores  \
+- Store-specific effects are shrunk toward the global means, providing more stable estimates  \
+- This helps address potential Simpson's Paradox issues by properly accounting for store-level clustering and product-specific variations  \
+
+The hierarchical approach is particularly appropriate here as it matches the natural clustering in our data (24 observations nested within each of 20 stores) and allows us to properly account for both within-store and between-store variations in sales, including potential store specialization in either food or coffee sales.
+
+#### Packages and Preprocessing
+We use the brms package for Bayesian modeling, which provides a flexible framework for specifying complex models and estimating them using Markov Chain Monte Carlo (MCMC) methods. Data preprocessing consisted only of converting food and store columns to factors using the tidyverse package.
+
+### Priors
+
+#### Data Distribution
+
+We should look at the distribution of data to understand the range and spread of our variables. This will help us choose appropriate priors that reflect the scale and nature of our data.
+
+```{r echo=FALSE}
+sales_dist <- ggplot(c_shop, aes(x = sales)) +
+  geom_histogram(bins = 30, fill = "steelblue", alpha = 0.7) +
+  labs(title = "Distribution of Sales",
+       x = "Standardized Sales",
+       y = "Count") +
+  theme_minimal()
+
+traits_dist <- ggplot(c_shop) +
+  geom_density(aes(x = con, fill = "Conscientiousness"), alpha = 0.5) +
+  geom_density(aes(x = neur, fill = "Neuroticism"), alpha = 0.5) +
+  labs(title = "Distribution of Personality Traits",
+       x = "Standardized Score",
+       y = "Density") +
+  scale_fill_manual(values = c("steelblue", "darkred"),
+                    name = "Trait") +
+  theme_minimal()
+
+print(sales_dist)
+print(traits_dist)
+```
+
+#### Priors Chosen and Rationale
+
+We selected weakly informative priors based on the standardized nature of our data and the observed distributions:
+
+**Fixed Effects**  \
+$\beta_0, \beta_1, \beta_2, \beta_3, \beta_4, \beta_5$ ~ Normal(0, 10)
+
+*Rationale:*  \
+Mean = 0: Appropriate since our predictors and outcome are standardized  \
+SD = 10 -> chosen because:  \
+- Our sales data spans roughly ±6 units  \
+- Most effects in standardized data are typically < 2  \
+- Width of 10 is sufficiently uninformative while still providing some regularization  \
+
+**Random Effects**  \
+Level 1 residual: $\sigma$ ~ Half-Cauchy(0, 2)  \
+Random intercepts: $\tau_{\gamma 0}$ ~ Half-Cauchy(0, 2)  \
+Random slopes: $\tau_{\gamma 1}$ ~ Half-Cauchy(0, 2)  \
+
+*Rationale:*  \
+Scale = 2 is appropriate because:  \
+- Half-Cauchy priors ensure positive variances  \
+- Scale parameter of 2 is appropriate for standardized data  \
+- Applied to all three variance components needed in the hierarchical model  \
+
+These prior choices provide regularization while remaining sufficiently diffuse to let the data drive our inferences about both fixed effects and variance components.
+
+### Findings
+
+#### 1. Impact of Personality Traits on Sales
+
+***Coffee Sales (food=0) effects:***  \
+*Conscientiousness: β = 0.35 [95% CI: -0.62, 1.33]*  \
+*Neuroticism: β = -0.42 [95% CI: -1.02, 0.18]*  \
+
+***Additional effects for Food Sales (interaction terms):***  \
+*Conscientiousness × Food: β = 1.01 [95% CI: 0.31, 1.69]*  \
+*Neuroticism × Food: β = 0.11 [95% CI: -0.32, 0.55]*  \
+
+**Key findings about personality impacts:**  \
+Conscientiousness has different effects on food vs coffee sales:
+
+- For coffee: Modest positive effect (0.35 units per SD increase)  \
+- For food: Strong positive effect (0.35 + 1.01 = 1.36 units per SD increase)  \
+- The difference is statistically credible (95% CI for interaction excludes 0)  \
+
+Neuroticism shows weaker associations:*  \
+
+- For coffee: Negative trend (-0.42 units per SD increase)  \
+- For food: Slightly less negative (-0.42 + 0.11 = -0.31 units per SD increase)  \
+- Effects are not statistically credible (95% CIs include 0)  \
+
+#### 2. Store Performance Analysis
+Random effects analysis reveals substantial store-level variation:
+
+- Store-level SD for baseline (coffee) sales: 1.28 [95% CI: 0.88, 1.86]
+- Store-level SD for food vs coffee difference: 0.85 [95% CI: 0.53, 1.34]
+
+Top 3 performing stores (controlling for personality):
+
+1. Store 14: +3.46 SD above average
+2. Store 12: +1.71 SD above average
+3. Store 17: +1.60 SD above average
+
+Bottom 3 performing stores:
+
+1. Store 16: -1.00 SD below average
+2. Store 9: -0.75 SD below average
+3. Store 1: -0.59 SD below average
+
+#### 3. Product Type Comparison
+
+- Baseline difference between food and coffee sales: -0.84 [95% CI: -1.31, -0.39]
+- This indicates generally lower sales for food compared to coffee
+- However, substantial store-to-store variation exists in this difference (SD = 0.85)
+
+### Summary 
+Based on our hierarchical Bayesian analysis, we can provide several key insights to help the coffee shop chain optimize their operations:
+
+**1. Manager Personality Impact**  \
+Conscientiousness matters significantly, but differently for each product line: 
+
+- Conscientious managers excel particularly at food sales  \
+- The effect is more than three times stronger for food (1.36 units) than coffee (0.35 units)  \
+- This suggests conscientious managers may be better at maintaining food quality standards and inventory  \
+
+Neuroticism shows less clear impacts:
+
+- There's a trend toward negative effects on both food and coffee sales  \
+- The impact appears slightly stronger on coffee sales  \
+- However, the uncertainty in these estimates means we can't make strong conclusions about neuroticism  \
+
+**Store Performance Insights**  \
+Several stores are significantly outperforming expectations:
+
+- Store 14 is the standout performer, exceeding expected sales by over 3 standard deviations  \
+- Stores 12 and 17 also show notably strong performance  \
+- These stores may have best practices that could be studied and replicated  \
+
+Some stores need attention:
+
+- Stores 16, 9, and 1 are underperforming even after accounting for manager personality  \
+- This suggests other factors (location, staff training, operations) may need review  \
+- These stores represent prime opportunities for improvement  \
+
+**Strategic Recommendations**
+
+- Consider personality traits in hiring/placement decisions, particularly for locations with high food sales potential
+- Study the practices of top-performing stores (especially Store 14) for potential system-wide improvements
+- Investigate underperforming stores for operational or local market challenges
+Consider specialized training or support for stores with lower food sales performance
+
+
+**Areas for Further Analysis**
+
+- What specific practices in top-performing stores drive their success?
+- Are there other manager characteristics that might explain store performance?
+- Could store-specific factors (location, demographics, competition) explain performance variations?
+
+### Diagnostics
+```{r message=FALSE, results='hide'}
+# our model
+mod <- brm(
+  sales ~ food + con + neur + con:food + neur:food + (food|store),
+  data = c_shop,
+  prior = c(
+    # fixed effects
+    prior(normal(0, 10), class = "b"),
+    # SD of the random effects
+    prior(cauchy(0, 2), class = "sd"),
+    # residual SD
+    prior(cauchy(0, 2), class = "sigma")
+  ),
+  chains = 4,
+  iter = 2000,
+  warmup = 1000,
+  cores = 4,
+  seed = 101
+)
+```
+
+```{r}
+# model summary
+summary(mod)
+```
+
+```{r}
+# store performance metrics
+store_performance <- coef(mod)$store[,,1] |>
+  as.data.frame() |>
+  select(Estimate) |>
+  rownames_to_column("store")
+```
+
+```{r}
+# sort stores by performance
+store_rankings <- store_performance |>
+  arrange(desc(Estimate))
+```
+
+```{r}
+# store performance rankings
+print(store_rankings)
+```
+
+```{r message=FALSE}
+# MCMC diagnostics
+plot(mod)
+```
+
+```{r message=FALSE}
+# posterior predictive check
+pp_check(mod)  
+```
+
+```{r}
+# plots of store performance
+ggplot(store_performance, aes(x = reorder(store, -Estimate), y = Estimate)) +
+  geom_point() +
+  theme_minimal() +
+  labs(x = "Store", y = "Performance Effect", 
+       title = "Store Performance Rankings")
+```
+
+```{r}
+# check for divergences
+divergent <- nuts_params(mod) %>%
+  filter(Parameter == "divergent__")
+# number of divergences
+print(sum(divergent$Value))
+```
+
+```{r}
+# random effects correlation analysis
+print(VarCorr(mod))
+```
