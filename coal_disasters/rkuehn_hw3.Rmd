@@ -1,0 +1,393 @@
+---
+title: "hw3"
+author: "Richard 'Ricky' Kuehn"
+date: "2024-11-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(Rmpfr)
+library(brms)
+library(tidyverse)
+library(bayesplot)
+```
+
+```{r}
+#Make sure you install the Rmpfr library
+dat = read.csv("coal_data.csv")
+```
+
+### Part I
+#### 1.
+```{r}
+# Implement Gibbs sampler
+gibbs_sampler = function(iter, dat, a_mu, b_mu, a_lambda, b_lambda){
+  mu_vec = vector()
+  lambda_vec = vector() 
+  k_prob_mat = matrix(nrow = iter+1, ncol = 111)
+  k_samp_vec = vector()
+  
+  # Initialize sampler
+  mu_vec[1] = rgamma(1, a_mu, rate = b_mu)
+  lambda_vec[1] = rgamma(1, a_lambda, rate = b_lambda)
+  k_prob_mat[1,] = rep(1/111, 111)
+  k_samp_vec[1] = 56
+  
+  # Sampler
+  for(i in 2:(iter+1)){
+    # Update mu - Gamma(a_mu + sum(X[1:k]), k + b_mu)
+    k = k_samp_vec[i-1]
+    mu_vec[i] = rgamma(1, shape = a_mu + sum(dat[1:k, 2]), 
+                       rate = k + b_mu)
+    
+    # Update lambda - Gamma(a_lambda + sum(X[k+1:112]), 112-k + b_lambda)
+    lambda_vec[i] = rgamma(1, shape = a_lambda + sum(dat[(k+1):112, 2]), 
+                          rate = (112-k) + b_lambda)
+    
+    # Update k probabilities
+    l_temp = vector()
+    for(j in 1:111){  
+      l_temp[j] = sum(log(mpfr(dpois(dat[1:j,2], lambda = rep(mu_vec[i],j)), 
+                              precBits = 100))) + 
+                  sum(log(mpfr(dpois(dat[(j+1):112,2], lambda = rep(lambda_vec[i],112-j)), 
+                              precBits = 100)))
+    }
+    l_temp <- mpfr(l_temp, precBits = 100)
+    k_prob_mat[i,] = as.numeric(exp(l_temp)/sum(exp(l_temp))) 
+    k_samp_vec[i] = sample(size = 1, 1:111, prob = k_prob_mat[i,])
+  }
+  
+  toReturn = data.frame(mu = as.numeric(mu_vec),
+                       lambda = as.numeric(lambda_vec), 
+                       k = k_samp_vec)
+  return(toReturn)
+}
+```
+
+```{r}
+# changed n to 100 for computation time
+set.seed(123)
+results = gibbs_sampler(100, dat, a_mu = 1, b_mu = 1, a_lambda = 1, b_lambda = 1)
+```
+
+```{r}
+# Calculate EAP and credible intervals for rates
+mu_summary = c(
+  EAP = mean(results$mu),
+  CI_lower = as.numeric(quantile(results$mu, probs = 0.025)),
+  CI_upper = as.numeric(quantile(results$mu, probs = 0.975))
+)
+
+lambda_summary = c(
+  EAP = mean(results$lambda),
+  CI_lower = as.numeric(quantile(results$lambda, probs = 0.025)),
+  CI_upper = as.numeric(quantile(results$lambda, probs = 0.975))
+)
+
+# Find most frequent changepoint years
+k_table = table(results$k)
+top_k = sort(k_table, decreasing=TRUE)[1:5]
+changepoint_years = as.numeric(names(top_k)) + 1851
+```
+
+```{r}
+# rate before changepoint
+cat("EAP:", round(mu_summary["EAP"], 2), "disasters per year\n")
+cat("95% CI: [", round(mu_summary["CI_lower"], 2), ",", 
+    round(mu_summary["CI_upper"], 2), "]\n")
+
+# rate after changepoint
+cat("EAP:", round(lambda_summary["EAP"], 2), "disasters per year\n")
+cat("95% CI: [", round(lambda_summary["CI_lower"], 2), ",", 
+    round(lambda_summary["CI_upper"], 2), "]\n")
+
+# top 5 years
+cat("\nTop 5 most probable changepoint years:\n")
+for(i in 1:5) {
+    cat(changepoint_years[i], ": ", top_k[i], " occurrences\n")
+}
+```
+
+***Findings***
+a. The analysis reveals two distinct periods in coal mining safety:
+- Before changepoint: Around 3.03 disasters per year (95% CI: 2.47 to 3.71)
+- After changepoint: Around 0.94 disasters per year (95% CI: 0.72 to 1.14)
+
+These intervals imply a clear and significant decrease in disaster rates, with roughly a 69% reduction. The most likely year for this changepoint was 1892 (with 26.7% probability), followed closely by 1891 (24.8%)
+
+b. Case against EAP and credible intervals:
+- The changepoint year is discrete (must be a whole year) while EAP could give a fractional year
+- The posterior distribution is not symmetric or normal-shaped - it's clustered around specific years
+- A credible interval could include years with very low probability just because they lie between high-probability years
+- Reporting the actual probabilities of specific years (like we did for 1891-1892) gives a clearer picture of the uncertainty in the changepoint location
+- An interval estimate suggests all years within it are equally plausible, which isn't true in this case
+
+#### 2.
+```{r}
+metropolis_gibbs_sampler = function(iter, dat, a_mu, b_mu, a_lambda, b_lambda){
+  mu_vec = vector()
+  lambda_vec = vector() 
+  k_samp_vec = vector()
+  accept_count = 0
+  
+  # Initialize
+  mu_vec[1] = rgamma(1, a_mu, rate = b_mu)
+  lambda_vec[1] = rgamma(1, a_lambda, rate = b_lambda)
+  k_samp_vec[1] = 56
+  
+  for(i in 2:(iter+1)){
+    # Update mu
+    mu_vec[i] = rgamma(1, 
+                       shape = a_mu + sum(dat[1:k_samp_vec[i-1], 2]), 
+                       rate = k_samp_vec[i-1] + b_mu)
+    
+    # Update lambda
+    lambda_vec[i] = rgamma(1, 
+                          shape = a_lambda + sum(dat[(k_samp_vec[i-1]+1):112, 2]), 
+                          rate = (112-k_samp_vec[i-1]) + b_lambda)
+    
+    # Metropolis step for k
+    k_current = k_samp_vec[i-1]
+    k_proposal = sample(1:111, 1)  # Uniform proposal
+    
+    # Calculate likelihood ratio
+    log_like_current = sum(dpois(dat[1:k_current,2], 
+                                lambda = mu_vec[i], 
+                                log = TRUE)) + 
+                      sum(dpois(dat[(k_current+1):112,2], 
+                              lambda = lambda_vec[i], 
+                              log = TRUE))
+    
+    log_like_proposal = sum(dpois(dat[1:k_proposal,2], 
+                                 lambda = mu_vec[i], 
+                                 log = TRUE)) + 
+                       sum(dpois(dat[(k_proposal+1):112,2], 
+                               lambda = lambda_vec[i], 
+                               log = TRUE))
+    
+    # Accept/reject step
+    ratio = exp(log_like_proposal - log_like_current)
+    if(runif(1) < ratio) {
+      k_samp_vec[i] = k_proposal
+      accept_count = accept_count + 1
+    } else {
+      k_samp_vec[i] = k_current
+    }
+  }
+  
+  return(list(
+    samples = data.frame(mu = mu_vec, lambda = lambda_vec, k = k_samp_vec),
+    acceptance_rate = accept_count/iter
+  ))
+}
+```
+
+
+```{r}
+# Run sampler
+set.seed(123)
+metro_results = metropolis_gibbs_sampler(100, dat, a_mu = 1, b_mu = 1, a_lambda = 1, b_lambda = 1)
+
+cat("Acceptance Rate:", round(metro_results$acceptance_rate, 3))
+```
+
+***Finding***
+a. How are the results similar/different than the fully Gibbs sampler?
+- Similar: Both samplers ultimately target the same posterior distribution
+- Different: The Metropolis version has a very low acceptance rate (7%) compared to the Gibbs sampler
+  * This means it's getting "stuck" at the same values for long periods
+  * Takes longer to explore the full range of possible values
+  * Less efficient at sampling from the posterior distribution
+
+b. What is the issue with this particular implementation?
+- The uniform proposal distribution (sampling k* from all possible years 1 to 111) is inefficient because:
+  * Most proposals are to years far from the current state
+  * These distant proposals are likely to have very low likelihood ratios
+  * This results in the very low acceptance rate (7%)
+  * The chain rarely accepts moves, staying stuck in the same state
+
+#### 3.
+```{r}
+local_metropolis_gibbs_sampler = function(iter, dat, a_mu, b_mu, a_lambda, b_lambda){
+  mu_vec = vector()
+  lambda_vec = vector() 
+  k_samp_vec = vector()
+  accept_count = 0
+  
+  # Initialize
+  mu_vec[1] = rgamma(1, a_mu, rate = b_mu)
+  lambda_vec[1] = rgamma(1, a_lambda, rate = b_lambda)
+  k_samp_vec[1] = 56
+  
+  for(i in 2:(iter+1)){
+    # Update mu
+    mu_vec[i] = rgamma(1, 
+                       shape = a_mu + sum(dat[1:k_samp_vec[i-1], 2]), 
+                       rate = k_samp_vec[i-1] + b_mu)
+    
+    # Update lambda
+    lambda_vec[i] = rgamma(1, 
+                          shape = a_lambda + sum(dat[(k_samp_vec[i-1]+1):112, 2]), 
+                          rate = (112-k_samp_vec[i-1]) + b_lambda)
+    
+    # Metropolis step for k with local proposal
+    k_current = k_samp_vec[i-1]
+    
+    # Generate local proposal with bounds check
+    k_min = max(1, k_current - 1)
+    k_max = min(111, k_current + 1)
+    k_proposal = sample(k_min:k_max, 1)
+    
+    # Calculate likelihood ratio
+    log_like_current = sum(dpois(dat[1:k_current,2], 
+                                lambda = mu_vec[i], 
+                                log = TRUE)) + 
+                      sum(dpois(dat[(k_current+1):112,2], 
+                              lambda = lambda_vec[i], 
+                              log = TRUE))
+    
+    log_like_proposal = sum(dpois(dat[1:k_proposal,2], 
+                                 lambda = mu_vec[i], 
+                                 log = TRUE)) + 
+                       sum(dpois(dat[(k_proposal+1):112,2], 
+                               lambda = lambda_vec[i], 
+                               log = TRUE))
+    
+    # Accept/reject
+    ratio = exp(log_like_proposal - log_like_current)
+    if(runif(1) < ratio) {
+      k_samp_vec[i] = k_proposal
+      accept_count = accept_count + 1
+    } else {
+      k_samp_vec[i] = k_current
+    }
+  }
+  
+  return(list(
+    samples = data.frame(mu = mu_vec, lambda = lambda_vec, k = k_samp_vec),
+    acceptance_rate = accept_count/iter
+  ))
+}
+```
+
+```{r}
+set.seed(123)
+uniform_results = metropolis_gibbs_sampler(100, dat, a_mu = 1, b_mu = 1, a_lambda = 1, b_lambda = 1)
+local_results = local_metropolis_gibbs_sampler(100, dat, a_mu = 1, b_mu = 1, a_lambda = 1, b_lambda = 1)
+```
+
+```{r}
+cat("Uniform proposal acceptance rate:", round(uniform_results$acceptance_rate, 3), "\n")
+cat("Local proposal acceptance rate:", round(local_results$acceptance_rate, 3), "\n")
+
+# Compare top changepoint years for both methods
+uniform_k_table = table(uniform_results$samples$k)
+local_k_table = table(local_results$samples$k)
+
+cat("\nTop 5 changepoint years (Uniform Proposal):\n")
+top_k_uniform = sort(uniform_k_table, decreasing=TRUE)[1:5]
+for(i in 1:5) {
+    year = as.numeric(names(top_k_uniform[i])) + 1851
+    cat(year, ": ", top_k_uniform[i], " occurrences\n")
+}
+
+cat("\nTop 5 changepoint years (Local Proposal):\n")
+top_k_local = sort(local_k_table, decreasing=TRUE)[1:5]
+for(i in 1:5) {
+    year = as.numeric(names(top_k_local[i])) + 1851
+    cat(year, ": ", top_k_local[i], " occurrences\n")
+}
+```
+
+***Findings***
+The original Gibbs sampler effectively identifies the changepoint around 1890-1892. The Uniform Metropolis-within-Gibbs shows similar results but with poor efficiency (7% acceptance rate) due to proposing many distant, unlikely years. While the Local Metropolis improves the acceptance rate dramatically (68%), it gets stuck around 1905-1908. These results suggest that while the local proposal improved efficiency, it may have introduced a different problem by making it hard for the chain to move between distant modes of the posterior distribution. This is a good example of why MCMC diagnostics should look at more than just acceptance rates.
+
+### Part II
+```{r}
+wine_data <- read.csv("whitewine-train.csv")
+wine_data$quality_binary <- ifelse(wine_data$wine_quality == "A", 1, 0)
+```
+
+
+```{r}
+# find best variables for overall classification
+glm_overall <- glm(quality_binary ~ fixed.acidity + volatile.acidity + citric.acid + residual.sugar + chlorides + free.sulfur.dioxide + total.sulfur.dioxide + density + pH + sulphates + alcohol, data=wine_data, family=binomial)
+
+# look at variable importance
+coef_summary <- summary(glm_overall)$coefficients
+top_vars_overall <- names(sort(abs(coef_summary[,1]), decreasing=TRUE))[2:4]
+top_vars_overall
+```
+
+
+```{r}
+# fit overall model with top 3 variables
+model1 <- brm(
+  formula = quality_binary ~ density + residual.sugar + pH,
+  family = bernoulli(),
+  data = wine_data,
+  chains = 4,
+  iter = 2000,
+  seed = 123
+)
+```
+
+
+```{r}
+# filter for A-rated wines
+wine_data_A <- wine_data[wine_data$quality_binary == 1,]
+```
+
+
+```{r}
+# find best variables for A-rated wine classifier
+glm_A <- glm(quality_binary ~ fixed.acidity + volatile.acidity + citric.acid + residual.sugar + chlorides + free.sulfur.dioxide + total.sulfur.dioxide + density + pH + sulphates + alcohol,
+             data=wine_data_A, family=binomial)
+
+# look at variable importance
+coef_summary_A <- summary(glm_A)$coefficients
+top_vars_A <- names(sort(abs(coef_summary_A[,1]), decreasing=TRUE))[2:4]
+top_vars_A
+```
+
+
+```{r}
+# fit A-rated model with top 3 variables
+model2 <- brm(
+  formula = quality_binary ~ density + residual.sugar + total.sulfur.dioxide,
+  family = bernoulli(),
+  data = wine_data,
+  chains = 4,
+  iter = 2000,
+  seed = 123
+)
+```
+
+
+```{r}
+summary(model1)
+```
+
+
+```{r}
+summary(model2)
+```
+
+
+```{r}
+# trace plot
+mcmc_trace(model1)
+mcmc_trace(model2)
+```
+
+
+```{r}
+# forest plot
+mcmc_intervals(as.matrix(model1))
+mcmc_intervals(as.matrix(model2))
+```
+
+***Interpretation***
+Based on the brms analysis of wine quality classification, we identified two sets of three variables that best predict wine quality. Both models show excellent convergence according to the trace plots, with stable mixing across all chains and no concerning patterns. The forest plots and model summaries reveal that density (-1.76 [-2.17, -1.37] for Model 1; -1.84 [-2.27, -1.40] for Model 2) and residual sugar (1.38 [0.98, 1.79] for Model 1; 1.33 [0.93, 1.75] for Model 2) are consistently the strongest predictors across both models, with density having a strong negative association and residual sugar having a strong positive association with wine quality. The key difference between the models is in their third predictor: Model 1 includes pH with a significant positive effect (0.33 [0.12, 0.53]), while Model 2 includes total sulfur dioxide with a non-significant effect (0.14 [-0.11, 0.41]). Both models show similar large negative intercepts (-3.89 and -3.86 respectively), indicating that A-rated wines are relatively rare in the dataset. The trace plots demonstrate good mixing and convergence for all parameters, while the forest plots visually confirm the relative importance and precision of each predictor, suggesting that Model 1 with pH as the third predictor might be slightly more effective due to having three clearly significant predictors instead of two.
