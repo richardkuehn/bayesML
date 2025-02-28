@@ -1,0 +1,279 @@
+---
+title: "h2_code"
+author: "Richard 'Ricky' Kuehn"
+date: "2024-10-09"
+output: html_document
+---
+##### packages
+```{r}
+library(tidyverse)
+library(dirmult)
+```
+
+#### Part 1
+
+***explore data:***
+
+```{r}
+wine <- read.csv("hw2_data.csv")
+```
+
+```{r}
+summary(wine)
+```
+
+```{r}
+# alcohol density
+ggplot (wine, aes(x=alcohol)) + 
+    geom_density(fill='red', alpha=0.5)
+```
+
+```{r}
+# pH density
+ggplot (wine, aes(x=pH)) + 
+    geom_density(fill='blue', alpha=0.5)
+```
+The distribution of pH is probably about as close to a normal distribution as we can get. The distribution of alcohol is skewed to the right. Obviously, this data has been normalized as all variables have a mean of 0.
+
+***normal likelihood:***
+
+```{r}
+# alc, pH
+alc <- wine$alcohol
+pH <- wine$pH
+```
+
+```{r}
+# function for normal likelihood posterior distribution calculation
+normal_post <- function(data, prior_mean, prior_precision) {
+  n <- length(data)
+  
+  data_mean <- mean(data)
+  data_var <- var(data)
+  data_precision <- 1 / data_var
+  
+  post_precision <- prior_precision + n * data_precision
+  
+  post_mean <- (prior_precision*prior_mean + n*data_precision*data_mean) / post_precision
+  post_var <- 1 / post_precision
+  
+  return(list(mean = post_mean, var = post_var))
+}
+```
+
+```{r}
+# alc posterior
+alc_uninf <- normal_post(alc, 0, 0.001) # very low precision because very high variance
+alc_inf <- normal_post(alc, 0, 1) # very high precision because very low variance
+
+# pH posterior 
+pH_uninf <- normal_post(pH, 0, 0.001)
+pH_inf <- normal_post(pH, 0, 1)
+```
+
+```{r}
+cat('Uninformed priors post alc: mean (', alc_uninf$mean, '), var(', alc_uninf$var, ')')
+```
+```{r}
+cat('Informed priors post alc: mean (', alc_inf$mean, '), var(', alc_inf$var, ')')
+```
+```{r}
+cat('Uninformed priors post pH: mean (', pH_uninf$mean, '), var(', pH_uninf$var, ')')
+```
+```{r}
+cat('Informed priors post pH: mean (', pH_inf$mean, '), var(', pH_inf$var, ')')
+```
+
+***interpretation:***
+There is minimal difference between the posteriors using uninformed and informed priors. This is likely because the the sample size is very large and overwhelming the priors we are using. This means we can't really choose bad hyper-parameters because the result will ultimately be driven by our data. Consequently, altering our priors will have very little impact on inference.
+
+***exponential likelihood:***
+```{r}
+alc_shift <- alc+2.1
+pH_shift <- pH+3.1
+```
+
+
+```{r}
+# exponential likelihood with gamma prior
+exp_post <- function(data, prior_shape, prior_rate) {
+  n <- length(data)
+  post_shape <- prior_shape + n
+  post_rate <- prior_rate + sum(data)
+  return(list(shape = post_shape, rate = post_rate))
+}
+```
+
+```{r}
+# uninform priors
+uninf_exp_post_alc <- exp_post(alc_shift, 0.5, 0)
+uninf_exp_post_pH <- exp_post(pH_shift, 0.5, 0)
+
+# inform priors
+inf_exp_post_alc <- exp_post(alc_shift, 4, 1)
+inf_exp_post_pH <- exp_post(pH_shift, 4, 1)
+```
+
+```{r}
+# expected values, variances for exponential posts (moments)
+exp_moments <- function(shape, rate) {
+  exp_mean <- shape / rate
+  var <- shape / (rate^2)
+  return(list(exp_mean = exp_mean, var = var))
+}
+```
+
+```{r}
+uninf_exp_moments_alc <- exp_moments(uninf_exp_post_alc$shape, uninf_exp_post_alc$rate)
+uninf_exp_moments_pH <- exp_moments(uninf_exp_post_pH$shape, uninf_exp_post_pH$rate)
+inf_exp_moments_alc <- exp_moments(inf_exp_post_alc$shape, inf_exp_post_alc$rate)
+inf_exp_moments_pH <- exp_moments(inf_exp_post_pH$shape, inf_exp_post_pH$rate)
+```
+
+```{r}
+cat('Exponential Expected Mean and Variance (uninf alc): mean (', uninf_exp_moments_alc$exp_mean - 2.1, '), var(', uninf_exp_moments_alc$var, ') \n')
+cat('Exponential Expected Mean and Variance (inf alc): mean (', inf_exp_moments_alc$exp_mean - 2.1, '), var(', inf_exp_moments_alc$var, ') \n')
+
+cat('Exponential Expected Mean and Variance (uninf pH): mean (', uninf_exp_moments_pH$exp_mean - 3.1, '), var(', uninf_exp_moments_pH$var, ') \n')
+cat('Exponential Expected Mean and Variance (inf pH): mean (', inf_exp_moments_pH$exp_mean - 3.1, '), var(', inf_exp_moments_pH$var, ') \n')
+```
+
+***interpretation:***
+The last step involved scaling back to our original because we added 2.1 and 3.1 at the beginning so everything would be positive. The exponential likelihood is also not very sensitive to the priors we choose. This is once again likely attributed to large sample size overwhelming the priors we are using. This means we can't really choose bad hyper-parameters because the result will ultimately be driven by our data. Consequently, altering our priors will have very little impact on inference. 
+
+I have to admit, from all the research I did to complete this problem, I don't understand why we did a exponential likelihood considering the distribution of our data.
+
+#### Part 2
+
+***multinomial priors:***
+
+```{r}
+quality <- wine$wine_quality
+table(quality)
+```
+
+```{r}
+n <- as.vector(table(quality))
+n
+```
+
+```{r}
+uninf <- c(1000, 1000, 1000)
+inf <- c(10, 200, 100)
+```
+
+```{r}
+set.seed(101)
+post_uninf <- rdirichlet(1000, uninf + n)
+post_inf <- rdirichlet(1000, inf + n)
+```
+
+```{r}
+head(post_uninf)
+```
+
+```{r}
+post_uninf_df <- as.data.frame(post_uninf)
+post_inf_df <- as.data.frame(post_inf)
+
+names(post_uninf_df) <- c('a', 'c', 'f')
+names(post_inf_df) <- c('a', 'c', 'f')
+```
+
+```{r}
+# Boxplot for uninformative prior
+ggplot(post_uninf_df) +
+  geom_boxplot(aes(y = a, x = "A"), orientation = "y", color = 'red') +
+  geom_boxplot(aes(y = c, x = "C"), orientation = "y", color = 'blue') +
+  geom_boxplot(aes(y = f, x = "F"), orientation = "y", color = 'green') +
+  labs(title = "Posterior Distribution (Uninformative Prior)",
+       y = "Probability", 
+       x = "Wine Quality") +
+  ylim(0, 1)
+```
+
+```{r}
+# Boxplot for uninformative prior
+ggplot(post_inf_df) +
+  geom_boxplot(aes(y = a, x = "A"), orientation = "y", color = 'red') +
+  geom_boxplot(aes(y = c, x = "C"), orientation = "y", color = 'blue') +
+  geom_boxplot(aes(y = f, x = "F"), orientation = "y", color = 'green') +
+  labs(title = "Posterior Distribution (Informative Prior)",
+       y = "Probability", 
+       x = "Wine Quality") +
+  ylim(0, 1)
+```
+
+***true proportions***
+```{r}
+prop.table(table(quality))
+```
+
+***interpretation:***
+I think the biggest thing I notice is the impact the size of the prior has on the posterior. The uninformative prior drowned out the obs count of each grade. Because I used 1000 for all uninformative priors, it brought everything closer together (towards 0.33333). When I used a informative prior with a ratio between values similar to the actual data, the posterior was much closer to the actual data. This problem is a good example of how an uninformative prior can really impact the posterior. I will say that I am surprised rdirichlet uses the count of values as opposed to proportions, as I'd like that would be more useful.
+
+
+#### Part 3
+
+```{r}
+alc_A <- wine$alcohol[wine$wine_quality == 'A']
+alc_F <- wine$alcohol[wine$wine_quality == 'F']
+```
+
+
+```{r}
+# function for normal likelihood posterior distribution calculation
+normal_post <- function(data, prior_mean, prior_precision) {
+  n <- length(data)
+  
+  data_mean <- mean(data)
+  data_var <- var(data)
+  data_precision <- 1 / data_var
+  
+  post_precision <- prior_precision + n * data_precision
+  
+  post_mean <- (prior_precision*prior_mean + n*data_precision*data_mean) / post_precision
+  post_var <- 1 / post_precision
+  
+  return(list(mean = post_mean, var = post_var))
+}
+```
+
+```{r}
+# alc posterior
+alcA_uninf <- normal_post(alc_A, 0, 0.001) # very low precision because very high variance
+alcA_inf <- normal_post(alc_A, 0, 1) # very high precision because very low variance
+
+# pH posterior 
+alcF_uninf <- normal_post(alc_F, 0, 0.001)
+alcF_inf <- normal_post(alc_F, 0, 1)
+```
+
+```{r}
+# difference uninf
+diff_uninf_mean <- alcA_uninf$mean - alcF_uninf$mean
+diff_uninf_var <- alcA_uninf$var - alcF_uninf$var
+```
+
+```{r}
+# difference inf
+diff_inf_mean <- alcA_inf$mean - alcF_inf$mean
+diff_inf_var <- alcA_inf$var - alcF_inf$var
+```
+
+***High Density Interval (HDI):***
+```{r}
+library(HDInterval)
+
+# 95% HDI
+hdi_uninf <- hdi(qnorm, mean = diff_uninf_mean, sd = sqrt(diff_uninf_var), credMass = 0.95)
+hdi_inf <- hdi(qnorm, mean = diff_inf_mean, sd = sqrt(diff_inf_var), credMass = 0.95)                 
+```
+
+```{r}
+cat('HDI (uninf): ', hdi_uninf, '\n')
+cat('HDI (inf): ', hdi_inf, '\n')
+```
+
+***interpretation:***
+From these intervals (which don't include 0), we can confidently say that 'A' wines have between ~1.25 - ~1.65 more alcohol than 'F' wines. This result is determined regardless of the prior we use. As we know from Problem 1, the sample size seems to be drowning out our choice of priors, and therefor manipulating them does not have a meaningful impact on our posterior distribution.
